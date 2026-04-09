@@ -1,614 +1,338 @@
 #!/bin/bash
 
-################################################################################
-# SCRIPT DE PROVISIONING - LARAVEL + DOCKER + GIT
-# ============================================================================
-# Soporta: Debian 11, 12 / Ubuntu 20.04, 22.04, 24.04
-# Versión: 3.0 - PROFESIONAL Y VALIDADO
-# Fecha: 2026-04-09
-# Status: ✅ TESTEADO Y FUNCIONAL
-################################################################################
-
 set -e
 
-# ════════════════════════════════════════════════════════════════════════════
-# CONFIGURACIÓN GLOBAL
-# ════════════════════════════════════════════════════════════════════════════
-
-readonly SCRIPT_VERSION="3.0"
-readonly SCRIPT_NAME="Provisioning Laravel + Docker"
-readonly MIN_DISK_SPACE_GB=10
-readonly MIN_MEMORY_MB=1024
-
+# Colores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
 NC='\033[0m'
 
-# ════════════════════════════════════════════════════════════════════════════
-# FUNCIONES DE LOGGING
-# ════════════════════════════════════════════════════════════════════════════
-
-log() { 
-    echo -e "${GREEN}[$(date +'%H:%M:%S')]${NC} $1" 
+# Función para imprimir mensajes
+log() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
 }
 
-error() { 
-    echo -e "${RED}[ERROR]${NC} $1" >&2
-    exit 1 
+error() {
+    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}" >&2
+    exit 1
 }
 
-warn() { 
-    echo -e "${YELLOW}[ADVERTENCIA]${NC} $1" 
+warn() {
+    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARN: $1${NC}"
 }
 
-info() { 
-    echo -e "${BLUE}[INFO]${NC} $1" 
+info() {
+    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1${NC}"
 }
 
-success() { 
-    echo -e "${GREEN}[✓]${NC} $1" 
-}
-
-debug() {
-    [ "$DEBUG" = "1" ] && echo -e "${MAGENTA}[DEBUG]${NC} $1"
-}
-
-separator() {
-    echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
-}
-
-# ════════════════════════════════════════════════════════════════════════════
-# VALIDACIONES INICIALES
-# ════════════════════════════════════════════════════════════════════════════
-
-check_root() {
+# Función para verificar si el usuario tiene privilegios de sudo
+check_sudo() {
     if [ "$EUID" -ne 0 ]; then
-        error "Este script debe ejecutarse como root (usa: sudo ./script.sh)"
-    fi
-    success "Ejecutando como root"
-}
-
-check_system_resources() {
-    info "Verificando recursos del sistema..."
-    
-    # Espacio en disco
-    local available_space=$(df /opt 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}' || df / | awk 'NR==2 {print int($4/1024/1024)}')
-    if [ "$available_space" -lt "$MIN_DISK_SPACE_GB" ]; then
-        warn "Espacio disponible: ${available_space}GB (se recomienda ${MIN_DISK_SPACE_GB}GB)"
-    else
-        success "Espacio disponible: ${available_space}GB"
-    fi
-    
-    # Memoria RAM
-    local available_memory=$(free -m | awk 'NR==2 {print int($7)}')
-    if [ "$available_memory" -lt "$MIN_MEMORY_MB" ]; then
-        warn "Memoria disponible: ${available_memory}MB (se recomienda ${MIN_MEMORY_MB}MB)"
-    else
-        success "Memoria disponible: ${available_memory}MB"
+        if ! sudo -n true 2>/dev/null; then
+            error "Este script requiere privilegios de sudo. Por favor ejecuta con sudo o como root."
+        fi
     fi
 }
 
+# Función para detectar la distribución de Linux
 detect_os() {
-    if [ ! -f /etc/os-release ]; then
-        error "No se puede detectar el SO (falta /etc/os-release)"
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        OS_VERSION=$VERSION_ID
+    else
+        error "No se pudo detectar la distribución de Linux"
     fi
-    
-    . /etc/os-release
-    OS_ID="$ID"
-    OS_VERSION="$VERSION_ID"
-    OS_NAME="$PRETTY_NAME"
-    
-    debug "SO detectado: $OS_ID v$OS_VERSION"
-    
-    case "$OS_ID" in
-        debian|ubuntu)
-            success "Sistema: $OS_NAME"
+}
+
+# Función para actualizar el sistema
+update_system() {
+    log "Actualizando el sistema..."
+    case "$OS" in
+        ubuntu|debian)
+             apt-get update -qq
+             apt-get upgrade -y -qq
+            ;;
+        centos|rhel|fedora)
+             yum update -y -q
             ;;
         *)
-            error "SO no soportado: $OS_ID (solo soporta Debian/Ubuntu)"
+            error "Sistema operativo no soportado: $OS"
             ;;
     esac
 }
 
-check_internet() {
-    info "Verificando conexión a internet..."
-    if ! ping -c 1 8.8.8.8 &> /dev/null; then
-        warn "No hay conexión a internet detectada"
-        return 1
+# Función para instalar paquetes básicos
+run_cmd() {
+    if command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        "$@"
     fi
-    success "Conexión a internet OK"
 }
-
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 1: ACTUALIZAR SISTEMA
-# ════════════════════════════════════════════════════════════════════════════
-
-update_system() {
-    separator
-    info "PASO 1: Actualizando sistema..."
-    separator
-    
-    info "Ejecutando apt-get update..."
-    apt-get update -qq || error "Falló apt-get update"
-    debug "apt-get update exitoso"
-    
-    info "Ejecutando apt-get upgrade..."
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq || error "Falló apt-get upgrade"
-    debug "apt-get upgrade exitoso"
-    
-    success "Sistema actualizado"
-}
-
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 2: INSTALAR HERRAMIENTAS BÁSICAS
-# ════════════════════════════════════════════════════════════════════════════
 
 install_basic_tools() {
-    separator
-    info "PASO 2: Instalando herramientas básicas..."
-    separator
-    
-    # Lista de paquetes requeridos
-    local PACKAGES=(
-        "git"
-        "curl"
-        "wget"
-        "rsync"
-        "openssh-client"
-        "openssh-server"
-        "ca-certificates"
-        "gnupg"
-        "unzip"
-        "make"
-        "nano"
-        "vim"
-        "htop"
-        "passwd"  # Contiene usermod, groupadd en Debian
-        "lsb-release"
-        "apt-transport-https"
-        "software-properties-common"
-    )
-    
-    info "Instalando ${#PACKAGES[@]} paquetes..."
-    for package in "${PACKAGES[@]}"; do
-        if ! command -v "$package" &>/dev/null; then
-            debug "Instalando: $package"
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$package" 2>/dev/null || {
-                warn "No se pudo instalar $package (continuando...)"
-            }
-        else
-            debug "$package ya está instalado"
-        fi
-    done
-    
-    # Verificar comandos críticos
-    for cmd in git curl usermod groupadd; do
-        if ! command -v "$cmd" &>/dev/null; then
-            error "Comando crítico no disponible: $cmd"
-        fi
-        debug "✓ Comando disponible: $cmd"
-    done
-    
-    success "Herramientas instaladas"
+    log "Instalando herramientas básicas..."
+    case "$OS" in
+        ubuntu|debian)
+            run_cmd apt-get update -qq
+            run_cmd apt-get install -y -qq \
+                git curl wget rsync openssh-client openssh-server \
+                ca-certificates gnupg unzip make nano htop vim
+            ;;
+        centos|rhel|fedora)
+            run_cmd dnf install -y -q \
+                git curl wget rsync openssh-clients openssh-server \
+                unzip nano htop vim
+            ;;
+    esac
 }
 
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 3: INSTALAR DOCKER
-# ════════════════════════════════════════════════════════════════════════════
-
+# Función para instalar Docker
 install_docker() {
-    separator
-    info "PASO 3: Instalando Docker..."
-    separator
-    
-    # Verificar si ya está instalado
-    if command -v docker &>/dev/null; then
-        success "Docker ya instalado: $(docker --version)"
-        return 0
-    fi
-    
-    info "Descargando repositorio de Docker..."
-    
-    # Instalar dependencias previas
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ca-certificates curl gnupg lsb-release 2>/dev/null || true
-    
-    # Crear directorio para claves
-    mkdir -p /etc/apt/keyrings
-    debug "Directorio /etc/apt/keyrings creado"
-    
-    # Descargar clave GPG de Docker
-    info "Descargando clave GPG de Docker..."
-    if ! curl -fsSL https://download.docker.com/linux/$OS_ID/gpg 2>/dev/null | \
-        gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
-        error "No se pudo descargar la clave GPG de Docker"
-    fi
-    debug "Clave GPG descargada"
-    
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    debug "Permisos de clave configurados"
-    
-    # Agregar repositorio
-    info "Agregando repositorio de Docker..."
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-        https://download.docker.com/linux/$OS_ID $(lsb_release -cs) stable" | \
-        tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
-    apt-get update -qq || error "Falló actualizar repositorios después de agregar Docker"
-    debug "Repositorio de Docker agregado"
-    
-    # Instalar Docker
-    info "Instalando paquetes de Docker..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        docker-ce docker-ce-cli containerd.io \
-        docker-buildx-plugin docker-compose-plugin 2>/dev/null || \
-        error "Falló instalar paquetes de Docker"
-    
-    debug "Paquetes de Docker instalados"
-    
-    # Crear grupo docker si no existe
-    if ! getent group docker > /dev/null 2>&1; then
-        info "Creando grupo docker..."
-        groupadd docker || error "No se pudo crear grupo docker"
-        debug "Grupo docker creado"
-    else
-        debug "Grupo docker ya existe"
-    fi
-    
-    # Obtener usuario real
-    REAL_USER="${SUDO_USER:-root}"
-    debug "Usuario real: $REAL_USER"
-    
-    # Agregar usuario al grupo docker
-    if [ "$REAL_USER" != "root" ]; then
-        if ! id -nG "$REAL_USER" | grep -qw docker; then
-            info "Agregando $REAL_USER al grupo docker..."
-            usermod -aG docker "$REAL_USER" || error "No se pudo agregar usuario a docker"
-            debug "Usuario agregado al grupo docker"
-        else
-            debug "Usuario ya está en grupo docker"
-        fi
-    fi
-    
-    # Configurar permisos del socket
-    chown root:docker /var/run/docker.sock 2>/dev/null || true
-    chmod 660 /var/run/docker.sock 2>/dev/null || true
-    debug "Permisos del socket configurados"
-    
-    # Habilitar e iniciar servicio
-    systemctl enable docker 2>/dev/null || true
-    systemctl restart docker || error "No se pudo iniciar servicio Docker"
-    debug "Servicio Docker iniciado"
-    
-    info "Esperando que Docker esté listo (3 segundos)..."
-    sleep 3
-    
-    # Verificar que funciona
-    if docker ps > /dev/null 2>&1; then
-        success "Docker funcionando: $(docker --version)"
-    else
-        error "Docker no responde. Revisa: systemctl status docker"
-    fi
-}
+    log "Instalando Docker..."
 
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 4: INSTALAR DOCKER COMPOSE
-# ════════════════════════════════════════════════════════════════════════════
+    if command -v docker >/dev/null 2>&1; then
+        warn "Docker ya está instalado"
+        return
+    fi
+
+    case "$OS" in
+        ubuntu|debian)
+            run_cmd apt-get update -qq
+            run_cmd apt-get install -y -qq ca-certificates curl gnupg
+
+            run_cmd install -m 0755 -d /etc/apt/keyrings
+
+            curl -fsSL https://download.docker.com/linux/$OS/gpg | \
+                run_cmd gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+            run_cmd chmod a+r /etc/apt/keyrings/docker.gpg
+
+            echo \
+              "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS \
+              $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+              run_cmd tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            run_cmd apt-get update -qq
+
+            run_cmd apt-get install -y -qq \
+                docker-ce docker-ce-cli containerd.io \
+                docker-buildx-plugin docker-compose-plugin
+            ;;
+    esac
+
+    # Asegurar PATH
+    export PATH=$PATH:/usr/sbin:/sbin
+
+    # Crear grupo docker si no existe
+    if ! getent group docker >/dev/null; then
+        run_cmd groupadd docker
+    fi
+
+    # Detectar usuario real
+    REAL_USER=${SUDO_USER:-$USER}
+
+    # Agregar al grupo
+    if command -v usermod >/dev/null 2>&1; then
+        run_cmd usermod -aG docker "$REAL_USER"
+    elif [ -x /usr/sbin/usermod ]; then
+        run_cmd /usr/sbin/usermod -aG docker "$REAL_USER"
+    else
+        warn "No se pudo agregar el usuario al grupo docker"
+    fi
+
+    # Iniciar servicio
+    if command -v systemctl >/dev/null 2>&1; then
+        run_cmd systemctl enable docker
+        run_cmd systemctl start docker
+    else
+        warn "systemctl no disponible"
+    fi
+
+    log "Docker instalado correctamente"
+    log "IMPORTANTE: ejecuta 'newgrp docker' o vuelve a iniciar sesión"
+}
 
 install_docker_compose() {
-    separator
-    info "PASO 4: Instalando Docker Compose..."
-    separator
-    
-    if command -v docker-compose &>/dev/null; then
-        success "Docker Compose ya instalado: $(docker-compose --version)"
-        return 0
+    log "Instalando Docker Compose..."
+    if command -v docker-compose &> /dev/null; then
+        warn "Docker Compose ya está instalado"
+        return
     fi
-    
-    info "Obteniendo última versión de Docker Compose..."
-    local VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest 2>/dev/null | \
-        grep tag_name | cut -d'"' -f4 | sed 's/v//' || echo "2.24.0")
-    
-    if [ -z "$VERSION" ]; then
-        VERSION="2.24.0"
-        warn "No se obtuvo versión, usando 2.24.0"
-    fi
-    
-    debug "Versión: $VERSION"
-    
-    info "Descargando Docker Compose v$VERSION..."
-    if ! curl -fsSL "https://github.com/docker/compose/releases/download/v${VERSION}/docker-compose-$(uname -s)-$(uname -m)" \
-        -o /usr/local/bin/docker-compose 2>/dev/null; then
-        error "No se pudo descargar Docker Compose"
-    fi
-    
-    chmod +x /usr/local/bin/docker-compose || error "No se pudo cambiar permisos"
-    ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose 2>/dev/null || true
-    
-    success "Docker Compose instalado: $(docker-compose --version)"
+
+    # Descargar la última versión estable de Docker Compose
+    curl -L "https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-$(uname -s)-$(uname -m)" \
+        -o /usr/local/bin/docker-compose --silent
+
+    # Dar permisos de ejecución
+    chmod +x /usr/local/bin/docker-compose
+
+    # Crear enlace simbólico para compatibilidad
+    ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+
+    log "Docker Compose instalado correctamente"
 }
 
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 5: CONFIGURAR SSH DEL SERVIDOR
-# ════════════════════════════════════════════════════════════════════════════
-
+# Función para configurar SSH
 setup_ssh() {
-    separator
-    info "PASO 5: Configurando SSH..."
-    separator
-    
-    info "Creando backup de sshd_config..."
-    cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.backup.$(date +%s)" || \
-        error "No se pudo crear backup"
-    success "Backup creado"
-    
-    info "Aplicando configuración de seguridad..."
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/g' /etc/ssh/sshd_config
-    sed -i 's/PermitRootLogin yes/PermitRootLogin no/g' /etc/ssh/sshd_config
-    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/g' /etc/ssh/sshd_config
-    sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/g' /etc/ssh/sshd_config
-    
-    debug "Configuración aplicada"
-    
-    info "Validando configuración de SSH..."
-    if sshd -t 2>/dev/null; then
-        systemctl restart ssh || systemctl restart sshd
-        success "SSH configurado y reiniciado"
-    else
-        error "Configuración SSH inválida. Se ha revertido el cambio."
-    fi
+    log "Configurando SSH..."
+
+    # Asegurarse de que el directorio .ssh existe
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
+
+    # Configurar permisos adecuados para el directorio SSH
+     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config
+     sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+    # Reiniciar servicio SSH
+    systemctl restart ssh
+
+    log "SSH configurado correctamente"
 }
 
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 6: CONFIGURAR SSH PARA GITHUB
-# ════════════════════════════════════════════════════════════════════════════
-
+# Función para configurar el acceso SSH a GitHub modificada a ED25519
 setup_github_ssh() {
-    separator
-    info "PASO 6: Configurando SSH para GitHub..."
-    separator
-    
-    REAL_USER="${SUDO_USER:-root}"
-    HOME_DIR=$(eval echo "~$REAL_USER")
-    KEY_PATH="$HOME_DIR/.ssh/id_ed25519"
-    
-    debug "Usuario: $REAL_USER, Home: $HOME_DIR"
-    
-    # Crear directorio .ssh
-    if [ ! -d "$HOME_DIR/.ssh" ]; then
-        info "Creando directorio .ssh..."
-        mkdir -p "$HOME_DIR/.ssh"
-        chmod 700 "$HOME_DIR/.ssh"
-        chown "$REAL_USER:$REAL_USER" "$HOME_DIR/.ssh"
-        debug "Directorio .ssh creado"
+    log "Configurando acceso SSH a GitHub (ED25519)..."
+
+    # Verificar si ya existe una clave SSH ED25519
+    if [ ! -f ~/.ssh/id_ed25519 ]; then
+        info "Generando nueva clave SSH ED25519..."
+        ssh-keygen -t ed25519 -C "devops@laravel-docker" -N "" -f ~/.ssh/id_ed25519
     fi
-    
-    # Generar clave
-    if [ ! -f "$KEY_PATH" ]; then
-        info "Generando clave ED25519..."
-        sudo -u "$REAL_USER" ssh-keygen -t ed25519 -C "devops@laravel" \
-            -N "" -f "$KEY_PATH" 2>/dev/null || error "No se pudo generar clave"
-        success "Clave generada"
-    else
-        info "Clave ED25519 ya existe"
-    fi
-    
-    # Permisos
-    chmod 600 "$KEY_PATH" 2>/dev/null || true
-    chmod 644 "$KEY_PATH.pub" 2>/dev/null || true
-    chown "$REAL_USER:$REAL_USER" "$KEY_PATH" "$KEY_PATH.pub" 2>/dev/null || true
-    
-    # Config SSH para GitHub
-    SSH_CONFIG="$HOME_DIR/.ssh/config"
-    if [ ! -f "$SSH_CONFIG" ] || ! grep -q "github.com" "$SSH_CONFIG" 2>/dev/null; then
-        info "Creando configuración SSH para GitHub..."
-        sudo -u "$REAL_USER" bash -c "cat >> ~/.ssh/config <<'EOF'
-Host github.com
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/id_ed25519
-  StrictHostKeyChecking accept-new
-EOF" 2>/dev/null || warn "No se pudo crear config SSH"
-        chmod 600 "$SSH_CONFIG" 2>/dev/null || true
-        debug "Configuración SSH creada"
-    fi
-    
-    # Mostrar clave pública
-    separator
-    warn "🔑 CLAVE PÚBLICA PARA GITHUB:"
-    separator
-    echo ""
-    sudo -u "$REAL_USER" cat "$KEY_PATH.pub" 2>/dev/null || cat "$KEY_PATH.pub"
-    echo ""
-    separator
-    warn "PASOS A SEGUIR:"
-    warn "1. Copia la clave anterior"
-    warn "2. Ve a: https://github.com/settings/keys"
-    warn "3. Click en 'New SSH key'"
-    warn "4. Pega la clave"
-    warn "5. Nombre: 'servidor-laravel'"
-    warn "6. Click en 'Add SSH key'"
-    separator
-    echo ""
-    
-    read -p "Presiona ENTER cuando hayas agregado la clave en GitHub..."
-    
-    info "Probando conexión a GitHub..."
-    if sudo -u "$REAL_USER" ssh -T git@github.com 2>&1 | grep -qE "(successfully|Hi )"; then
-        success "Conexión a GitHub OK"
-    else
-        warn "No se pudo verificar conexión (pero puede funcionar)"
-    fi
+
+    # Mostrar la clave pública para GitHub
+    log "Por favor agrega la siguiente clave pública a tu cuenta de GitHub:"
+    echo -e "${YELLOW}"
+    cat ~/.ssh/id_ed25519.pub
+    echo -e "${NC}"
+
+    read -p "Presiona Enter después de haber agregado la clave a GitHub..."
+
+    # Probar la conexión a GitHub
+    log "Probando conexión SSH con GitHub..."
+    ssh -o StrictHostKeyChecking=no -T git@github.com || true
 }
 
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 7: CLONAR REPOSITORIO
-# ════════════════════════════════════════════════════════════════════════════
-
+# Función para clonar el repositorio
 clone_repository() {
     local repo_url=$1
-    local target_dir=$2
-    
-    separator
-    info "PASO 7: Clonando repositorio..."
-    separator
-    
-    if [ -z "$repo_url" ]; then
-        error "URL del repositorio no proporcionada"
-    fi
-    
-    REAL_USER="${SUDO_USER:-root}"
-    debug "Clonando desde: $repo_url hacia: $target_dir"
-    
+    local target_dir=${2:-"/opt/laravel-app"}
+
+    log "Clonando repositorio: $repo_url"
+
     if [ -d "$target_dir" ]; then
-        info "Directorio existe, actualizando..."
-        sudo -u "$REAL_USER" bash -c "cd $target_dir && git pull origin main 2>/dev/null" || \
-            warn "No se pudo actualizar repositorio"
+        warn "El directorio $target_dir ya existe. Actualizando en lugar de clonar..."
+        cd "$target_dir"
+        git pull origin main
     else
-        info "Creando directorio: $target_dir"
-        mkdir -p "$target_dir"
-        chown "$REAL_USER:$REAL_USER" "$target_dir"
-        
-        info "Clonando repositorio..."
-        sudo -u "$REAL_USER" git clone "$repo_url" "$target_dir" || error "No se pudo clonar repositorio"
+         mkdir -p "$target_dir"
+         chown $USER:$USER "$target_dir"
+        git clone "$repo_url" "$target_dir"
+        cd "$target_dir"
     fi
-    
-    success "Repositorio clonado/actualizado"
+
+    # Configurar permisos para el proyecto
+    find . -type d -exec chmod 755 {} \;
+    find . -type f -exec chmod 644 {} \;
+
+    log "Repositorio clonado/actualizado en: $target_dir"
 }
 
-# ════════════════════════════════════════════════════════════════════════════
-# PASO 8: CONFIGURAR LARAVEL
-# ════════════════════════════════════════════════════════════════════════════
+# Función para configurar el entorno del proyecto
+setup_project() {
+    log "Configurando el proyecto Laravel..."
 
-setup_laravel() {
-    local target_dir=$1
-    
-    separator
-    info "PASO 8: Configurando Laravel..."
-    separator
-    
-    if [ ! -d "$target_dir" ]; then
-        error "Directorio del proyecto no existe"
+    # Copiar archivo de entorno si no existe
+    if [ ! -f .env ]; then
+        cp .env.example .env
     fi
-    
-    cd "$target_dir" || error "No se pudo acceder a $target_dir"
-    debug "Directorio actual: $(pwd)"
-    
-    # Buscar docker-compose file
-    local COMPOSE_FILE=""
-    if [ -f "docker-compose.dev.yml" ]; then
-        COMPOSE_FILE="docker-compose.dev.yml"
-    elif [ -f "docker-compose.yml" ]; then
-        COMPOSE_FILE="docker-compose.yml"
-    else
-        error "No se encontró docker-compose.yml o docker-compose.dev.yml"
-    fi
-    
-    debug "Usando: $COMPOSE_FILE"
-    
-    # Crear .env
-    if [ ! -f ".env" ]; then
-        if [ -f ".env.example" ]; then
-            info "Creando .env..."
-            cp .env.example .env
-            debug ".env creado desde .env.example"
-        else
-            warn "No hay .env.example, deberás crear .env manualmente"
-        fi
-    fi
-    
-    info "Construyendo contenedores..."
-    docker-compose -f "$COMPOSE_FILE" build 2>/dev/null || warn "Build puede tener warnings"
-    
-    info "Iniciando contenedores..."
-    docker-compose -f "$COMPOSE_FILE" up -d || error "No se pudo iniciar contenedores"
-    
-    sleep 5
-    debug "Esperando que contenedores estén listos"
-    
-    info "Instalando dependencias..."
-    docker-compose -f "$COMPOSE_FILE" exec -T app composer install 2>/dev/null || true
-    
-    info "Generando clave..."
-    docker-compose -f "$COMPOSE_FILE" exec -T app php artisan key:generate 2>/dev/null || true
-    
-    info "Ejecutando migraciones..."
-    docker-compose -f "$COMPOSE_FILE" exec -T app php artisan migrate --seed 2>/dev/null || true
-    
-    info "Configurando permisos..."
-    docker-compose -f "$COMPOSE_FILE" exec -T app chmod -R 775 storage bootstrap/cache 2>/dev/null || true
-    docker-compose -f "$COMPOSE_FILE" exec -T app chown -R www-data:www-data storage bootstrap/cache 2>/dev/null || true
-    
-    success "Laravel configurado"
+
+    # Construir contenedores Docker
+    log "Construyendo contenedores Docker..."
+    docker-compose -f docker-compose.dev.yml build
+
+    # Iniciar contenedores
+    log "Iniciando contenedores..."
+    docker-compose -f docker-compose.dev.yml up -d
+
+    # Instalar dependencias de Composer
+    log "Instalando dependencias de Composer..."
+    docker-compose -f docker-compose.dev.yml exec app composer install
+
+    # Generar key de Laravel
+    log "Generando key de aplicación..."
+    docker-compose -f docker-compose.dev.yml exec app php artisan key:generate
+
+    # Ejecutar migraciones
+    log "Ejecutando migraciones de base de datos..."
+    docker-compose -f docker-compose.dev.yml exec app php artisan migrate --seed
+
+    # Configurar permisos de almacenamiento
+    log "Configurando permisos..."
+    docker-compose -f docker-compose.dev.yml exec app chmod -R 775 storage bootstrap/cache
+    docker-compose -f docker-compose.dev.yml exec app chown -R www-data:www-data storage bootstrap/cache
+
+    log "Proyecto configurado correctamente"
 }
 
-# ════════════════════════════════════════════════════════════════════════════
-# FUNCIÓN PRINCIPAL
-# ════════════════════════════════════════════════════════════════════════════
-
+# Función principal
 main() {
-    separator
-    log ""
-    log "╔════════════════════════════════════════════════════════════════╗"
-    log "║                                                                ║"
-    log "║     PROVISIONING DE SERVIDOR - LARAVEL + DOCKER + GIT          ║"
-    log "║                   VERSION $SCRIPT_VERSION - PROFESIONAL                    ║"
-    log "║                                                                ║"
-    log "╚════════════════════════════════════════════════════════════════╝"
-    log ""
-    separator
-    
-    # Validaciones
-    check_root
+    log "Iniciando proceso de provisionamiento para entorno de desarrollo"
+
+    # Verificar privilegios de sudo
+    check_sudo
+
+    # Detectar sistema operativo
     detect_os
-    check_system_resources
-    check_internet || warn "Sin conexión a internet"
-    
-    # Pasos
+    info "Sistema operativo detectado: $OS $OS_VERSION"
+
+    # Actualizar sistema
     update_system
+
+    # Instalar herramientas básicas
     install_basic_tools
+
+    # Instalar Docker
     install_docker
+
+    # Instalar Docker Compose
     install_docker_compose
+
+    # Configurar SSH
     setup_ssh
+
+    # Configurar acceso a GitHub
     setup_github_ssh
-    
-    # Entrada del usuario
-    echo ""
-    read -p "📋 URL del repositorio (git@github.com:usuario/repo.git): " repo_url
-    [ -z "$repo_url" ] && error "URL del repositorio requerida"
-    
-    read -p "📁 Directorio destino (default: /opt/laravel-app): " target_dir
-    target_dir="${target_dir:-/opt/laravel-app}"
-    
-    clone_repository "$repo_url" "$target_dir"
-    setup_laravel "$target_dir"
-    
-    # Resumen final
-    separator
-    log ""
-    log "╔════════════════════════════════════════════════════════════════╗"
-    log "║                                                                ║"
-    log "║           ✅ ¡PROVISIONAMIENTO COMPLETADO! ✅                  ║"
-    log "║                                                                ║"
-    log "╚════════════════════════════════════════════════════════════════╝"
-    log ""
-    log "📊 RESUMEN:"
-    log "   ✓ Sistema: $OS_NAME"
-    log "   ✓ Docker: $(docker --version)"
-    log "   ✓ Docker Compose: $(docker-compose --version)"
-    log "   ✓ SSH: Configurado"
-    log "   ✓ GitHub: Conectado"
-    log "   ✓ Repositorio: $repo_url"
-    log "   ✓ Directorio: $target_dir"
-    log ""
-    log "🌐 Aplicación disponible en: http://localhost"
-    log ""
-    separator
+
+    # Solicitar URL del repositorio
+    read -p "Introduce la URL SSH de tu repositorio GitHub (ej: git@github.com:usuario/repo.git): " repo_url
+
+    if [ -z "$repo_url" ]; then
+        error "Debes proporcionar una URL de repositorio válida"
+    fi
+
+    # Clonar repositorio
+    clone_repository "$repo_url"
+
+    # Configurar proyecto
+    setup_project
+
+    # Mostrar información final
+    log "Provisionamiento completado exitosamente!"
+    info "Acceso a la aplicación: http://localhost"
+    info "Acceso a PHPMyAdmin: http://localhost:8080"
+    info "Para ver los logs: docker-compose logs -f"
+    info "Para detener los contenedores: docker-compose down"
+    info "Para iniciar los contenedores: docker-compose up -d"
+
+    # Recordatorio sobre la clave SSH
+    warn "Recuerda que has tenido que agregar manualmente la clave SSH a tu cuenta de GitHub"
+    warn "Puedes ver tu clave pública con: cat ~/.ssh/id_ed25519.pub"
 }
 
-# Ejecutar
+# Ejecutar función principal
 main "$@"
